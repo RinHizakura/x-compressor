@@ -1,7 +1,9 @@
+#include "libx.h"
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#include "libx.h"
+#define ORDER_CONFIG 2 
 
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -222,11 +224,54 @@ static void write_golomb(generic_io_t *io, size_t k, uint32_t N)
     write_bits(io, N, k);
 }
 
+
+static uint32_t reverse(uint32_t x)
+{
+    x = (((x & 0xaaaaaaaa) >> 1) | ((x & 0x55555555) << 1));
+    x = (((x & 0xcccccccc) >> 2) | ((x & 0x33333333) << 2));
+    x = (((x & 0xf0f0f0f0) >> 4) | ((x & 0x0f0f0f0f) << 4));
+    x = (((x & 0xff00ff00) >> 8) | ((x & 0x00ff00ff) << 8));
+    return ((x >> 16) | (x << 16));
+}
+
+
+static void write_expgolomb(generic_io_t *io, size_t order, uint32_t N)
+{
+    // 1. Encode ⌊x/2k⌋ using order-0 exp-Golomb code
+    uint32_t B = (N >> order) + 1;
+
+    assert(B != 0);
+    int zero_write = 32 - __builtin_clz(B) - 1;
+    // since zero_write won't larger then 32, so we can write zero bits directly
+    write_zero_bits(io, zero_write);
+
+    int total_bits = 32 - __builtin_clz(B);
+    write_bits(io, reverse(B) >> (32 - total_bits), total_bits);
+
+    // 2. Encode x mod 2k in binary
+    uint32_t mod = N & ((1 << order) - 1);
+    write_bits(io, mod, order);
+}
+
+
+
 static uint32_t read_golom(generic_io_t *io, size_t k)
 {
     uint32_t N = read_unary(io) << k;
     N |= read_bits(io, k);
     return N;
+}
+
+static uint32_t read_expgolom(generic_io_t *io, size_t order)
+{
+    uint32_t N = read_unary(io);
+    uint32_t rb = read_bits(io, N);
+    uint32_t num = reverse((rb << 1) | 1) >> (32 - N - 1);
+
+
+    rb = read_bits(io, order);
+
+    return (((num - 1) << order) | rb);
 }
 
 void x_init()
@@ -314,7 +359,9 @@ void *x_compress(void *iptr, size_t isize, void *optr)
         /* get index */
         uint8_t d = ctx->order[c];
 
-        write_golomb(&io, opt_k, (uint32_t) d);
+        // write_golomb(&io, opt_k, (uint32_t) d);
+        write_expgolomb(&io, ORDER_CONFIG, (uint32_t) d);
+
         assert(c == ctx->sorted[d]);
 
         /* Update context model */
@@ -326,7 +373,8 @@ void *x_compress(void *iptr, size_t isize, void *optr)
     }
 
     /* EOF symbol */
-    write_golomb(&io, opt_k, 256);
+    // write_golomb(&io, opt_k, 256);
+    write_expgolomb(&io, ORDER_CONFIG, 256);
 
     finalize(&io, WRITE_MODE);
 
@@ -344,8 +392,8 @@ void *x_decompress(void *iptr, size_t isize, void *optr)
     uint8_t *optrc = optr;
 
     for (;; ++optrc) {
-        uint32_t d = read_golom(&io, opt_k);
-
+        // uint32_t d = read_golom(&io, opt_k);
+        uint32_t d = read_expgolom(&io, ORDER_CONFIG);
         if (d >= 256)
             break;
 
